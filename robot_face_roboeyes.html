@@ -3,6 +3,11 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<meta name="theme-color" content="#0a0a0a"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Buddy"/>
+<link rel="manifest" href="manifest.json"/>
 <title>Robot Buddy — RoboEyes</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -80,11 +85,16 @@ const EYE = {
   cy:     320,   // centro verticale
 };
 
-// Centri degli occhi (calcolati da EYE)
+// Centri degli occhi a riposo (calcolati da EYE)
 const CX = {
   L: W/2 - EYE.gap/2 - EYE.w/2,
   R: W/2 + EYE.gap/2 + EYE.w/2,
 };
+
+// Movimento intero gruppo occhi nel canvas (50% dello spazio disponibile)
+const MAX_GX = (W/2 - EYE.w/2 - EYE.gap/2) * 0.50;
+const MAX_GY = (H/2 - EYE.h/2) * 0.50;
+let animGX = 0, animGY = 0;
 
 // ═══════════════════════════════════════════════════
 //  STATO ANIMAZIONE
@@ -114,7 +124,7 @@ const cur = {
   curiosity: false,
 
   // colori
-  eyeColor: "#ffffff",
+  eyeColor: "#00eeff",
   pupilColor: "#000000",
   bgColor: "#0a0a0a",
 };
@@ -132,75 +142,70 @@ const EMOTIONS = {
     lwx:1,   lwy:1,   rwx:1,   rwy:1,
     l_lid_top:0,   l_lid_bot:0,   r_lid_top:0,   r_lid_bot:0,
     l_brow:0, r_brow:0,
-    eyeColor:"#ffffff", curiosity:true,
+    eyeColor:"#00eeff", curiosity:true,
   },
 
   happy: {
     lwx:1,   lwy:0.85, rwx:1,   rwy:0.85,
-    // palpebra inferiore sale → occhio "sorridente"
     l_lid_top:0,   l_lid_bot:0.35, r_lid_top:0,   r_lid_bot:0.35,
     l_brow:0, r_brow:0,
-    eyeColor:"#ffffff", curiosity:false,
+    eyeColor:"#00eeff", curiosity:false,
   },
 
   tired: {
     lwx:1,   lwy:0.7, rwx:1,   rwy:0.7,
-    // palpebra superiore scende molto → occhi assonnati
     l_lid_top:0.45, l_lid_bot:0,   r_lid_top:0.45, r_lid_bot:0,
     l_brow:0, r_brow:0,
-    eyeColor:"#aaaaaa", curiosity:false,
+    eyeColor:"#0066aa", curiosity:false,
   },
 
   angry: {
     lwx:1,   lwy:0.85, rwx:1,   rwy:0.85,
-    // palpebra superiore scende a V → sopracciglio abbassato interno
     l_lid_top:0.35, l_lid_bot:0, r_lid_top:0.35, r_lid_bot:0,
-    // sopracciglio: sinistro inclinato a destra, destro a sinistra
     l_brow: 0.5, r_brow:-0.5,
-    eyeColor:"#ffffff", curiosity:false,
+    eyeColor:"#00eeff", curiosity:false,
   },
 
   surprised: {
     lwx:1.1, lwy:1.1, rwx:1.1, rwy:1.1,
     l_lid_top:0,   l_lid_bot:0,   r_lid_top:0,   r_lid_bot:0,
     l_brow: 0.3, r_brow:-0.3,
-    eyeColor:"#ffffff", curiosity:false,
+    eyeColor:"#00eeff", curiosity:false,
   },
 
   talking: {
     lwx:1,   lwy:0.9, rwx:1,   rwy:0.9,
     l_lid_top:0,   l_lid_bot:0.1, r_lid_top:0,   r_lid_bot:0.1,
     l_brow:0, r_brow:0,
-    eyeColor:"#ffffff", curiosity:false,
+    eyeColor:"#00eeff", curiosity:false,
   },
 
   thinking: {
     lwx:0.9, lwy:0.9, rwx:1.1, rwy:1.1,
-    // un occhio più chiuso (guarda di lato)
     l_lid_top:0.2, l_lid_bot:0,   r_lid_top:0,   r_lid_bot:0,
     l_brow:-0.2, r_brow:-0.4,
-    eyeColor:"#ffffff", curiosity:false,
+    eyeColor:"#00eeff", curiosity:false,
   },
 
   curious: {
     lwx:0.9, lwy:1.1, rwx:1.1, rwy:1.1,
     l_lid_top:0, l_lid_bot:0, r_lid_top:0, r_lid_bot:0,
-    l_brow:0.2, r_brow:-0.5,   // un sopracciglio alzato
-    eyeColor:"#ffffff", curiosity:true,
+    l_brow:0.2, r_brow:-0.5,
+    eyeColor:"#00eeff", curiosity:true,
   },
 
   love: {
     lwx:1,   lwy:0.9, rwx:1,   rwy:0.9,
     l_lid_top:0,   l_lid_bot:0.25, r_lid_top:0,   r_lid_bot:0.25,
     l_brow: 0.15, r_brow:-0.15,
-    eyeColor:"#ffaacc", curiosity:false,
+    eyeColor:"#ff55cc", curiosity:false,
   },
 
   sleeping: {
     lwx:1,   lwy:0.15, rwx:1,   rwy:0.15,
     l_lid_top:0.5, l_lid_bot:0.5, r_lid_top:0.5, r_lid_bot:0.5,
     l_brow:0, r_brow:0,
-    eyeColor:"#555555", curiosity:false,
+    eyeColor:"#003355", curiosity:false,
   },
 };
 
@@ -318,35 +323,50 @@ function drawEye(cx, cy, wScale, hScale, lidTop, lidBot, pupilDX, pupilDY, browA
   const ex = cx - ew/2;
   const ey = cy - eh/2;
 
+  // ── Bagliore esterno (stile anni 80) ─────────
+  // tre strati di ombra sfumata verso l'esterno
+  ctx.save();
+  ctx.shadowColor = "#00eeff";
+  ctx.shadowBlur  = 48;
+  roundRect(cx, cy, ew, eh, er);
+  ctx.fillStyle = "#00eeff";
+  ctx.fill();
+  ctx.restore();
+
+  // secondo strato — bagliore più morbido
+  ctx.save();
+  ctx.shadowColor = "#00aaff";
+  ctx.shadowBlur  = 90;
+  roundRect(cx, cy, ew, eh, er);
+  ctx.fillStyle = "rgba(0,174,255,0.0)";
+  ctx.fill();
+  ctx.restore();
+
   // ── Corpo occhio ──────────────────────────────
   ctx.save();
   roundRect(cx, cy, ew, eh, er);
-  ctx.fillStyle = cur.eyeColor;
+  ctx.fillStyle = cur.eyeColor;   // azzurro fluo
   ctx.fill();
 
   // Clip tutto il contenuto dell'occhio
   ctx.clip();
 
-  // ── Pupilla ───────────────────────────────────
-  // clamp pupilla dentro l'occhio
-  const maxPX = ew * 0.22, maxPY = eh * 0.22;
-  const pdx = Math.max(-maxPX, Math.min(maxPX, pupilDX));
-  const pdy = Math.max(-maxPY, Math.min(maxPY, pupilDY));
+  // ── Linea scanline orizzontale (effetto CRT anni 80) ──
+  for (let sy = ey; sy < ey + eh; sy += 7) {
+    ctx.fillStyle = "rgba(0,0,20,0.18)";
+    ctx.fillRect(ex, sy, ew, 3);
+  }
 
-  const pr = Math.min(ew, eh) * 0.28;
-  ctx.beginPath();
-  ctx.arc(cx + pdx, cy + pdy, pr, 0, Math.PI * 2);
-  ctx.fillStyle = cur.pupilColor;
+  // ── Riflesso speculare in alto a sinistra ─────
+  // striscia bianca semi-trasparente — look retro
+  ctx.save();
+  ctx.globalAlpha = 0.18;
+  roundRect(cx - ew*0.18, cy - eh*0.22, ew*0.5, eh*0.28, er*0.5);
+  ctx.fillStyle = "#ffffff";
   ctx.fill();
-
-  // Riflesso pupilla
-  ctx.beginPath();
-  ctx.arc(cx + pdx + pr*0.3, cy + pdy - pr*0.3, pr*0.2, 0, Math.PI*2);
-  ctx.fillStyle = "rgba(255,255,255,0.7)";
-  ctx.fill();
+  ctx.restore();
 
   // ── Palpebra SUPERIORE ────────────────────────
-  // scende dall'alto: 0=invisibile, 1=occhio chiuso
   if (lidTop > 0) {
     const lidH = eh * lidTop + er;
     ctx.fillStyle = cur.bgColor;
@@ -354,7 +374,6 @@ function drawEye(cx, cy, wScale, hScale, lidTop, lidBot, pupilDX, pupilDY, browA
   }
 
   // ── Palpebra INFERIORE ────────────────────────
-  // sale dal basso
   if (lidBot > 0) {
     const lidH = eh * lidBot + er;
     ctx.fillStyle = cur.bgColor;
@@ -362,21 +381,6 @@ function drawEye(cx, cy, wScale, hScale, lidTop, lidBot, pupilDX, pupilDY, browA
   }
 
   ctx.restore();
-
-  // ── Sopracciglio ──────────────────────────────
-  // è un rettangolo arrotondato inclinato sopra all'occhio
-  if (Math.abs(browAngle) > 0.01) {
-    const bw = ew * 0.9;
-    const bh = 12;
-    const bcy = cy - eh/2 - 22;
-    ctx.save();
-    ctx.translate(cx, bcy);
-    ctx.rotate(browAngle);
-    roundRect(0, 0, bw, bh, bh/2);
-    ctx.fillStyle = cur.eyeColor;
-    ctx.fill();
-    ctx.restore();
-  }
 }
 
 // ═══════════════════════════════════════════════════
@@ -412,10 +416,19 @@ function frame(ts) {
     if (blinkLid <= 0) blinkState = 0;
   }
 
-  // ── Tracking viso → posizione pupilla ─────────
+  // ── Tracking viso → movimento gruppo + residuo interno ──
   const sf = smoothFace();
-  animPX = lerp(animPX, (sf.x - 0.5) * 2 * MAX_PX + idlePX, 0.08 * dt);
-  animPY = lerp(animPY, (sf.y - 0.5) * 2 * MAX_PY + idlePY, 0.08 * dt);
+  const ndx = (1 - sf.x) - 0.5;
+  const ndy = sf.y - 0.5;
+
+  // Movimento intero gruppo nel canvas (50% dello spazio disponibile)
+  animGX = lerp(animGX, ndx * 2 * MAX_GX, 0.07 * dt);
+  animGY = lerp(animGY, ndy * 2 * MAX_GY, 0.07 * dt);
+
+  // Piccolo movimento interno residuo
+  animPX = lerp(animPX, ndx * 2 * MAX_PX + idlePX, 0.08 * dt);
+  animPY = lerp(animPY, ndy * 2 * MAX_PY + idlePY, 0.08 * dt);
+
 
   // ── Curiosity boost: occhio esterno si allarga
   //    quando la pupilla guarda ai lati
@@ -431,8 +444,8 @@ function frame(ts) {
 
   // ── Occhio sinistro ───────────────────────────
   drawEye(
-    CX.L + shakeX,
-    EYE.cy + shakeY,
+    CX.L + animGX + shakeX,
+    EYE.cy + animGY + shakeY,
     cur.lwx, cur.lwy,
     Math.max(cur.l_lid_top, blinkLid),
     cur.l_lid_bot,
@@ -443,8 +456,8 @@ function frame(ts) {
 
   // ── Occhio destro ─────────────────────────────
   drawEye(
-    CX.R + shakeX,
-    EYE.cy + shakeY,
+    CX.R + animGX + shakeX,
+    EYE.cy + animGY + shakeY,
     cur.rwx, cur.rwy,
     Math.max(cur.r_lid_top, blinkLid),
     cur.r_lid_bot,
@@ -615,6 +628,12 @@ scheduleBlink();
 requestAnimationFrame(frame);
 initTracking();
 setTimeout(()=>{ setState("in ascolto..."); startListening(); }, 2000);
+</script>
+<script>
+// ── PWA: registra service worker ──────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
 </script>
 </body>
 </html>
