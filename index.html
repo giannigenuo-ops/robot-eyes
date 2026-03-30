@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>Robot Buddy — RoboEyes</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0a0a0a;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    height:100vh;
+    overflow:hidden;
+  }
+  #cam { position:absolute; opacity:0; pointer-events:none; width:1px; height:1px; }
+  canvas {
+    display:block;
+    /* dimensione adattiva — occupa il massimo spazio disponibile */
+    width:  min(100vw, 100vh);
+    height: min(100vw, 100vh);
+    image-rendering: pixelated;
+  }
+  #state {
+    position:absolute; bottom:12px;
+    font-family:monospace; font-size:11px;
+    color:#222; letter-spacing:1px;
+  }
+</style>
+</head>
+<body>
+
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="c"></canvas>
+<div id="state">init...</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+// ═══════════════════════════════════════════════════
+//  CONFIGURAZIONE
+// ═══════════════════════════════════════════════════
+
+const GROQ_API_KEY = "INSERISCI_QUI_LA_TUA_API_KEY";
+const GROQ_MODEL   = "llama-3.3-70b-versatile";
+const ROBOT_IP     = "192.168.1.1";
+
+const SYSTEM_PROMPT = `Sei un simpatico robot buddy di nome Buddy.
+Sei curioso, energico e parli in italiano.
+Rispondi sempre in modo breve (massimo 2-3 frasi).
+Alla fine aggiungi su una riga separata: EMOTION:nome
+dove nome è una di: default, happy, tired, angry, surprised, talking, thinking, curious, love, sleeping.`;
+
+// ═══════════════════════════════════════════════════
+//  CANVAS SETUP
+// ═══════════════════════════════════════════════════
+
+const canvas = document.getElementById("c");
+const ctx    = canvas.getContext("2d");
+const W = 640, H = 640;
+canvas.width  = W;
+canvas.height = H;
+
+// ═══════════════════════════════════════════════════
+//  DEFINIZIONE OCCHI — ispirato a RoboEyes
+//  Ogni occhio è un rettangolo arrotondato
+//  con palpebre superiore e inferiore (trapezi)
+//  che si abbassano per le espressioni
+// ═══════════════════════════════════════════════════
+
+// Parametri base occhi (pixel nel canvas 640×640)
+const EYE = {
+  w:      160,   // larghezza occhio
+  h:      160,   // altezza occhio
+  r:       40,   // border radius
+  gap:     60,   // spazio tra i due occhi
+  cy:     320,   // centro verticale
+};
+
+// Centri degli occhi (calcolati da EYE)
+const CX = {
+  L: W/2 - EYE.gap/2 - EYE.w/2,
+  R: W/2 + EYE.gap/2 + EYE.w/2,
+};
+
+// ═══════════════════════════════════════════════════
+//  STATO ANIMAZIONE
+//  Tutti i valori sono interpolati con lerp
+// ═══════════════════════════════════════════════════
+
+// Stato corrente (interpolato)
+const cur = {
+  // dimensioni (scala 0..1 rispetto a EYE.w/h)
+  lwx: 1, lwy: 1,   // occhio sinistro width/height scale
+  rwx: 1, rwy: 1,   // occhio destro
+
+  // posizione pupilla (offset in px rispetto al centro)
+  px: 0, py: 0,
+
+  // palpebre: 0=aperta, 1=chiusa al 100%
+  // lid_top = palpebra superiore (scende dall'alto)
+  // lid_bot = palpebra inferiore (sale dal basso)
+  l_lid_top: 0, l_lid_bot: 0,
+  r_lid_top: 0, r_lid_bot: 0,
+
+  // angolo sopracciglio (radianti, positivo=inclinato verso centro)
+  l_brow: 0, r_brow: 0,
+
+  // apertura bocca (0=nessuna, 1=max) — solo animazione "sweat/laugh"
+  // curiosity: occhio esterno si allarga quando pupilla va ai lati
+  curiosity: false,
+
+  // colori
+  eyeColor: "#ffffff",
+  pupilColor: "#000000",
+  bgColor: "#0a0a0a",
+};
+
+// Stato target (verso cui interpolare)
+const tgt = { ...cur };
+
+// ═══════════════════════════════════════════════════
+//  EMOZIONI — mappate sullo stile RoboEyes
+// ═══════════════════════════════════════════════════
+
+const EMOTIONS = {
+
+  default: {
+    lwx:1,   lwy:1,   rwx:1,   rwy:1,
+    l_lid_top:0,   l_lid_bot:0,   r_lid_top:0,   r_lid_bot:0,
+    l_brow:0, r_brow:0,
+    eyeColor:"#ffffff", curiosity:true,
+  },
+
+  happy: {
+    lwx:1,   lwy:0.85, rwx:1,   rwy:0.85,
+    // palpebra inferiore sale → occhio "sorridente"
+    l_lid_top:0,   l_lid_bot:0.35, r_lid_top:0,   r_lid_bot:0.35,
+    l_brow:0, r_brow:0,
+    eyeColor:"#ffffff", curiosity:false,
+  },
+
+  tired: {
+    lwx:1,   lwy:0.7, rwx:1,   rwy:0.7,
+    // palpebra superiore scende molto → occhi assonnati
+    l_lid_top:0.45, l_lid_bot:0,   r_lid_top:0.45, r_lid_bot:0,
+    l_brow:0, r_brow:0,
+    eyeColor:"#aaaaaa", curiosity:false,
+  },
+
+  angry: {
+    lwx:1,   lwy:0.85, rwx:1,   rwy:0.85,
+    // palpebra superiore scende a V → sopracciglio abbassato interno
+    l_lid_top:0.35, l_lid_bot:0, r_lid_top:0.35, r_lid_bot:0,
+    // sopracciglio: sinistro inclinato a destra, destro a sinistra
+    l_brow: 0.5, r_brow:-0.5,
+    eyeColor:"#ffffff", curiosity:false,
+  },
+
+  surprised: {
+    lwx:1.1, lwy:1.1, rwx:1.1, rwy:1.1,
+    l_lid_top:0,   l_lid_bot:0,   r_lid_top:0,   r_lid_bot:0,
+    l_brow: 0.3, r_brow:-0.3,
+    eyeColor:"#ffffff", curiosity:false,
+  },
+
+  talking: {
+    lwx:1,   lwy:0.9, rwx:1,   rwy:0.9,
+    l_lid_top:0,   l_lid_bot:0.1, r_lid_top:0,   r_lid_bot:0.1,
+    l_brow:0, r_brow:0,
+    eyeColor:"#ffffff", curiosity:false,
+  },
+
+  thinking: {
+    lwx:0.9, lwy:0.9, rwx:1.1, rwy:1.1,
+    // un occhio più chiuso (guarda di lato)
+    l_lid_top:0.2, l_lid_bot:0,   r_lid_top:0,   r_lid_bot:0,
+    l_brow:-0.2, r_brow:-0.4,
+    eyeColor:"#ffffff", curiosity:false,
+  },
+
+  curious: {
+    lwx:0.9, lwy:1.1, rwx:1.1, rwy:1.1,
+    l_lid_top:0, l_lid_bot:0, r_lid_top:0, r_lid_bot:0,
+    l_brow:0.2, r_brow:-0.5,   // un sopracciglio alzato
+    eyeColor:"#ffffff", curiosity:true,
+  },
+
+  love: {
+    lwx:1,   lwy:0.9, rwx:1,   rwy:0.9,
+    l_lid_top:0,   l_lid_bot:0.25, r_lid_top:0,   r_lid_bot:0.25,
+    l_brow: 0.15, r_brow:-0.15,
+    eyeColor:"#ffaacc", curiosity:false,
+  },
+
+  sleeping: {
+    lwx:1,   lwy:0.15, rwx:1,   rwy:0.15,
+    l_lid_top:0.5, l_lid_bot:0.5, r_lid_top:0.5, r_lid_bot:0.5,
+    l_brow:0, r_brow:0,
+    eyeColor:"#555555", curiosity:false,
+  },
+};
+
+// ═══════════════════════════════════════════════════
+//  BLINK
+// ═══════════════════════════════════════════════════
+
+let blinkTimer = 0;
+let blinkState = 0;   // 0=aperto 1=chiude 2=apre
+
+function scheduleBlink() {
+  blinkTimer = setTimeout(() => {
+    triggerBlink();
+    scheduleBlink();
+  }, 3000 + Math.random() * 4000);
+}
+
+function triggerBlink() {
+  if (currentEmotion === "sleeping") return;
+  blinkState = 1;
+}
+
+// ═══════════════════════════════════════════════════
+//  FACE TRACKING — lerp verso posizione viso
+// ═══════════════════════════════════════════════════
+
+const MAX_PX = 30, MAX_PY = 22;
+const faceHist = [];
+let animPX = 0, animPY = 0;
+let trackOn = true;
+let noFace  = 0;
+
+function pushFace(nx, ny) {
+  faceHist.push({ x: nx, y: ny });
+  if (faceHist.length > 6) faceHist.shift();
+}
+function smoothFace() {
+  if (!faceHist.length) return { x:0.5, y:0.5 };
+  return {
+    x: faceHist.reduce((s,p)=>s+p.x,0)/faceHist.length,
+    y: faceHist.reduce((s,p)=>s+p.y,0)/faceHist.length,
+  };
+}
+
+// ═══════════════════════════════════════════════════
+//  IDLE MOVEMENT — micro-movimenti casuali
+// ═══════════════════════════════════════════════════
+
+let idleTimer = 0;
+let idlePX = 0, idlePY = 0;
+
+function scheduleIdle() {
+  idleTimer = setTimeout(() => {
+    idlePX = (Math.random() - 0.5) * 20;
+    idlePY = (Math.random() - 0.5) * 14;
+    scheduleIdle();
+  }, 2000 + Math.random() * 3000);
+}
+
+// ═══════════════════════════════════════════════════
+//  ANIMAZIONE CONFUSA (shake) e RISATA (bounce)
+// ═══════════════════════════════════════════════════
+
+let shakeX = 0, shakeY = 0, shakeTimer = 0;
+
+function animConfused() {
+  let t = 0, dir = 1;
+  clearInterval(shakeTimer);
+  shakeTimer = setInterval(() => {
+    shakeX = dir * 18;
+    dir = -dir; t++;
+    if (t > 10) { shakeX = 0; clearInterval(shakeTimer); }
+  }, 80);
+}
+
+function animLaugh() {
+  let t = 0, dir = 1;
+  clearInterval(shakeTimer);
+  shakeTimer = setInterval(() => {
+    shakeY = dir * 14;
+    dir = -dir; t++;
+    if (t > 10) { shakeY = 0; clearInterval(shakeTimer); }
+  }, 70);
+}
+
+// ═══════════════════════════════════════════════════
+//  DISEGNO PRINCIPALE
+// ═══════════════════════════════════════════════════
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+const SPD = 0.10;   // velocità interpolazione (0.05=lento, 0.2=veloce)
+
+// Disegna un rettangolo arrotondato
+function roundRect(cx, cy, w, h, r) {
+  const x = cx - w/2, y = cy - h/2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// Disegna UN occhio completo
+function drawEye(cx, cy, wScale, hScale, lidTop, lidBot, pupilDX, pupilDY, browAngle, curiosityBoost) {
+
+  const ew = EYE.w * wScale;
+  const eh = EYE.h * hScale * (1 + curiosityBoost);
+  const er = Math.min(EYE.r, ew/2, eh/2);
+  const ex = cx - ew/2;
+  const ey = cy - eh/2;
+
+  // ── Corpo occhio ──────────────────────────────
+  ctx.save();
+  roundRect(cx, cy, ew, eh, er);
+  ctx.fillStyle = cur.eyeColor;
+  ctx.fill();
+
+  // Clip tutto il contenuto dell'occhio
+  ctx.clip();
+
+  // ── Pupilla ───────────────────────────────────
+  // clamp pupilla dentro l'occhio
+  const maxPX = ew * 0.22, maxPY = eh * 0.22;
+  const pdx = Math.max(-maxPX, Math.min(maxPX, pupilDX));
+  const pdy = Math.max(-maxPY, Math.min(maxPY, pupilDY));
+
+  const pr = Math.min(ew, eh) * 0.28;
+  ctx.beginPath();
+  ctx.arc(cx + pdx, cy + pdy, pr, 0, Math.PI * 2);
+  ctx.fillStyle = cur.pupilColor;
+  ctx.fill();
+
+  // Riflesso pupilla
+  ctx.beginPath();
+  ctx.arc(cx + pdx + pr*0.3, cy + pdy - pr*0.3, pr*0.2, 0, Math.PI*2);
+  ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.fill();
+
+  // ── Palpebra SUPERIORE ────────────────────────
+  // scende dall'alto: 0=invisibile, 1=occhio chiuso
+  if (lidTop > 0) {
+    const lidH = eh * lidTop + er;
+    ctx.fillStyle = cur.bgColor;
+    ctx.fillRect(ex - 2, ey - 2, ew + 4, lidH + 2);
+  }
+
+  // ── Palpebra INFERIORE ────────────────────────
+  // sale dal basso
+  if (lidBot > 0) {
+    const lidH = eh * lidBot + er;
+    ctx.fillStyle = cur.bgColor;
+    ctx.fillRect(ex - 2, ey + eh - lidH, ew + 4, lidH + 2);
+  }
+
+  ctx.restore();
+
+  // ── Sopracciglio ──────────────────────────────
+  // è un rettangolo arrotondato inclinato sopra all'occhio
+  if (Math.abs(browAngle) > 0.01) {
+    const bw = ew * 0.9;
+    const bh = 12;
+    const bcy = cy - eh/2 - 22;
+    ctx.save();
+    ctx.translate(cx, bcy);
+    ctx.rotate(browAngle);
+    roundRect(0, 0, bw, bh, bh/2);
+    ctx.fillStyle = cur.eyeColor;
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  MAIN LOOP
+// ═══════════════════════════════════════════════════
+
+let blinkLid = 0;   // valore palpebra durante blink
+let lastTime = 0;
+
+function frame(ts) {
+  const dt = Math.min((ts - lastTime) / 16.67, 3);   // delta normalizzato a 60fps
+  lastTime = ts;
+  const t = SPD * dt;
+
+  // ── Interpolazione stato → cur ────────────────
+  cur.lwx       = lerp(cur.lwx,       tgt.lwx,       t);
+  cur.lwy       = lerp(cur.lwy,       tgt.lwy,       t);
+  cur.rwx       = lerp(cur.rwx,       tgt.rwx,       t);
+  cur.rwy       = lerp(cur.rwy,       tgt.rwy,       t);
+  cur.l_lid_top = lerp(cur.l_lid_top, tgt.l_lid_top, t);
+  cur.l_lid_bot = lerp(cur.l_lid_bot, tgt.l_lid_bot, t);
+  cur.r_lid_top = lerp(cur.r_lid_top, tgt.r_lid_top, t);
+  cur.r_lid_bot = lerp(cur.r_lid_bot, tgt.r_lid_bot, t);
+  cur.l_brow    = lerp(cur.l_brow,    tgt.l_brow,    t);
+  cur.r_brow    = lerp(cur.r_brow,    tgt.r_brow,    t);
+
+  // ── Blink ─────────────────────────────────────
+  if (blinkState === 1) {
+    blinkLid = Math.min(blinkLid + 0.18, 1);
+    if (blinkLid >= 1) blinkState = 2;
+  } else if (blinkState === 2) {
+    blinkLid = Math.max(blinkLid - 0.12, 0);
+    if (blinkLid <= 0) blinkState = 0;
+  }
+
+  // ── Tracking viso → posizione pupilla ─────────
+  const sf = smoothFace();
+  animPX = lerp(animPX, (sf.x - 0.5) * 2 * MAX_PX + idlePX, 0.08 * dt);
+  animPY = lerp(animPY, (sf.y - 0.5) * 2 * MAX_PY + idlePY, 0.08 * dt);
+
+  // ── Curiosity boost: occhio esterno si allarga
+  //    quando la pupilla guarda ai lati
+  const curiosityBoost = tgt.curiosity
+    ? Math.abs(animPX) / MAX_PX * 0.25
+    : 0;
+  const lCurious =  animPX < 0 ? curiosityBoost : 0;
+  const rCurious =  animPX > 0 ? curiosityBoost : 0;
+
+  // ── Sfondo ────────────────────────────────────
+  ctx.fillStyle = cur.bgColor;
+  ctx.fillRect(0, 0, W, H);
+
+  // ── Occhio sinistro ───────────────────────────
+  drawEye(
+    CX.L + shakeX,
+    EYE.cy + shakeY,
+    cur.lwx, cur.lwy,
+    Math.max(cur.l_lid_top, blinkLid),
+    cur.l_lid_bot,
+    animPX, animPY,
+    cur.l_brow,
+    lCurious
+  );
+
+  // ── Occhio destro ─────────────────────────────
+  drawEye(
+    CX.R + shakeX,
+    EYE.cy + shakeY,
+    cur.rwx, cur.rwy,
+    Math.max(cur.r_lid_top, blinkLid),
+    cur.r_lid_bot,
+    animPX, animPY,
+    cur.r_brow,
+    rCurious
+  );
+
+  requestAnimationFrame(frame);
+}
+
+// ═══════════════════════════════════════════════════
+//  SET EMOTION
+// ═══════════════════════════════════════════════════
+
+let currentEmotion = "default";
+
+function setEmotion(name) {
+  const e = EMOTIONS[name] || EMOTIONS.default;
+  currentEmotion = name;
+
+  Object.assign(tgt, e);
+  cur.eyeColor   = e.eyeColor;   // colore immediato (non interpolato)
+  cur.curiosity  = e.curiosity;
+
+  setState(name);
+  fetch(`http://${ROBOT_IP}/cmd?emotion=${name}`).catch(()=>{});
+}
+
+// ═══════════════════════════════════════════════════
+//  FACE DETECTION (MediaPipe leggero)
+// ═══════════════════════════════════════════════════
+
+async function initTracking() {
+  try {
+    const fd = new FaceDetection({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${f}`
+    });
+    fd.setOptions({ model:"short", minDetectionConfidence:0.5 });
+    fd.onResults(r => {
+      if (!trackOn) return;
+      if (!r.detections?.length) {
+        noFace++;
+        if (noFace > 20) pushFace(0.5, 0.5);
+        return;
+      }
+      noFace = 0;
+      const bb = r.detections[0].boundingBox;
+      pushFace(bb.xCenter, bb.yCenter);
+    });
+    const cam = new Camera(document.getElementById("cam"), {
+      onFrame: async () => await fd.send({ image: document.getElementById("cam") }),
+      width:320, height:240, facingMode:"user"
+    });
+    await cam.start();
+    setState("tracking attivo");
+  } catch(e) {
+    setState("tracking non disponibile");
+    pushFace(0.5, 0.5);
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  VOCE
+// ═══════════════════════════════════════════════════
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null, isListening = false, autoRestart = true;
+
+if (SR) {
+  recognition = new SR();
+  recognition.lang = "it-IT";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.onstart  = () => { isListening=true; setEmotion("curious"); setState("in ascolto..."); };
+  recognition.onresult = e  => { const t=e.results[0][0].transcript; setState(t); askAI(t); };
+  recognition.onend    = () => { isListening=false; };
+  recognition.onerror  = e  => {
+    if (e.error!=="no-speech") setState("mic: "+e.error);
+    if (autoRestart) setTimeout(startListening,1000);
+  };
+}
+
+function startListening() {
+  if (!recognition||isListening) return;
+  try { recognition.start(); } catch(e){}
+}
+
+// ═══════════════════════════════════════════════════
+//  AI — Groq
+// ═══════════════════════════════════════════════════
+
+async function askAI(testo) {
+  if (GROQ_API_KEY==="INSERISCI_QUI_LA_TUA_API_KEY") { speak("Configura la mia chiave AI!"); return; }
+  setEmotion("thinking");
+  autoRestart = false;
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":"Bearer "+GROQ_API_KEY},
+      body:JSON.stringify({
+        model:GROQ_MODEL,
+        messages:[{role:"system",content:SYSTEM_PROMPT},{role:"user",content:testo}],
+        max_tokens:200, temperature:0.8
+      })
+    });
+    const data = await res.json();
+    let risposta = data.choices?.[0]?.message?.content || "Non ho capito.";
+    const match = risposta.match(/EMOTION:\s*(\w+)/i);
+    if (match) {
+      const emo = match[1].toLowerCase();
+      if (EMOTIONS[emo]) setEmotion(emo);
+      if (emo==="happy"||emo==="love") setTimeout(animLaugh, 300);
+      if (emo==="angry") setTimeout(animConfused, 300);
+      risposta = risposta.replace(/EMOTION:\s*\w+/i,"").trim();
+    } else { setEmotion("talking"); }
+    speak(risposta);
+  } catch(err) {
+    setState("errore: "+err.message);
+    setEmotion("default");
+    autoRestart=true;
+    setTimeout(startListening,1500);
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  TTS
+// ═══════════════════════════════════════════════════
+
+function speak(testo) {
+  if (!window.speechSynthesis) { setEmotion("default"); autoRestart=true; setTimeout(startListening,500); return; }
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(testo);
+  utt.lang="it-IT"; utt.rate=1.05; utt.pitch=1.1;
+  utt.onstart = () => { setEmotion("talking"); setState("parlo..."); };
+  utt.onend   = () => { setEmotion("default"); autoRestart=true; setState("in ascolto..."); setTimeout(startListening,600); };
+  window.speechSynthesis.speak(utt);
+}
+
+// ═══════════════════════════════════════════════════
+//  COMANDO ESTERNO (da robot_control.html)
+// ═══════════════════════════════════════════════════
+
+setInterval(()=>{
+  try {
+    const msg = localStorage.getItem("buddy_cmd");
+    if (!msg) return;
+    localStorage.removeItem("buddy_cmd");
+    const d = JSON.parse(msg);
+    if (d.emotion && EMOTIONS[d.emotion]) setEmotion(d.emotion);
+    if (d.track===false) { trackOn=false; pushFace(0.5,0.5); }
+    if (d.track===true)  { trackOn=true; }
+    if (d.anim==="confused") animConfused();
+    if (d.anim==="laugh")    animLaugh();
+    if (d.anim==="blink")    triggerBlink();
+  } catch(e){}
+}, 200);
+
+function setState(t){ document.getElementById("state").textContent=t; }
+
+// ═══════════════════════════════════════════════════
+//  AVVIO
+// ═══════════════════════════════════════════════════
+
+setEmotion("default");
+scheduleIdle();
+scheduleBlink();
+requestAnimationFrame(frame);
+initTracking();
+setTimeout(()=>{ setState("in ascolto..."); startListening(); }, 2000);
+</script>
+</body>
+</html>
